@@ -35,6 +35,7 @@ from fastapi import Depends
 
 # Import routers
 from routers import websocket
+from utils.websocket_manager import WebSocketManager
 
 # Configure logging
 logging.basicConfig(
@@ -133,6 +134,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _check_service_health(http_client, IOT_SERVICE_URL, "IoT"),
         return_exceptions=True
     )
+
+    # 5. Initialize WebSocket manager (efficient connection pooling)
+    stock_ws_url = STOCK_SERVICE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws/stock/events"
+    ws_manager = WebSocketManager(stock_ws_url)
+    app.state.ws_manager = ws_manager
+    logger.info("✓ WebSocket manager initialized (connection pooling enabled)")
 
     logger.info(f"✓ {SERVICE_NAME} is ready")
 
