@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """
-WebSocket Router - Unified WebSocket endpoint for dashboard and events
+WebSocket Router - Unified WebSocket endpoint with connection pooling
 
-This router provides WebSocket endpoints that:
+Provides efficient WebSocket endpoints that:
 1. Accept client connections with authentication
-2. Send complete initial data immediately (no REST API needed)
-3. Subscribe to Stock service for real-time updates
-4. Forward stats, inventory, and event updates to clients
+2. Check user access to requested store
+3. Send filtered initial data based on user permissions
+4. Use connection pooling (ONE Stock WS per store, broadcast to all clients)
+5. Forward real-time updates with access control
 
 Endpoints:
 - /ws/dashboard/{store_id} - Dashboard page WebSocket
 - /ws/events/{store_id} - Retail events page WebSocket
 """
 
-import asyncio
-import json
 import logging
-import os
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-import websockets
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
 
 from common.auth import OAuth2BearerTokenValidator
 from services.aggregator import DataAggregator
@@ -28,89 +25,86 @@ from services.aggregator import DataAggregator
 logger = logging.getLogger("api.websocket")
 router = APIRouter(tags=["websocket"])
 
-# Configuration
-STOCK_SERVICE_URL = os.getenv("STOCK_SERVICE_URL", "http://stock:8000")
-WS_PUSH_INTERVAL = float(os.getenv("WS_PUSH_INTERVAL", "1.0"))
 
-
-def _get_stock_ws_url() -> str:
-    """Build the Stock service WebSocket URL."""
-    base = STOCK_SERVICE_URL
-    return base.replace("http://", "ws://").replace("https://", "wss://") + "/ws/stock/events"
-
-
-async def _forward_stock_updates(
-    stock_ws: websockets.WebSocketClientProtocol,
-    client_ws: WebSocket,
-    store_id: int
-):
+def _check_store_access(user: dict, store_id: int) -> bool:
     """
-    Forward messages from Stock service WebSocket to client.
+    Check if user has access to the requested store.
 
     Args:
-        stock_ws: Stock service WebSocket connection
-        client_ws: Client WebSocket connection
-        store_id: Store ID being monitored
+        user: Decoded JWT token payload
+        store_id: Store ID to check access for
+
+    Returns:
+        True if user has access, False otherwise
     """
-    try:
-        async for message in stock_ws:
-            try:
-                # Parse and forward the message
-                data = json.loads(message)
-                msg_type = data.get("type")
+    # Admins have access to all stores
+    if user.get("is_admin"):
+        return True
 
-                # Forward all message types: stats_update, inventory_update, event_pushed, etc.
-                logger.debug(f"Forwarding {msg_type} to client for store {store_id}")
-                await client_ws.send_json(data)
+    # Check if user has store_ids in their token
+    user_store_ids = user.get("store_ids", [])
+    if not user_store_ids:
+        # If no store_ids specified, deny access (unless admin)
+        return False
 
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON from stock service: {e}")
-            except Exception as e:
-                logger.error(f"Error forwarding message: {e}")
-                break
-
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Stock service WebSocket closed for store {store_id}")
-    except Exception as e:
-        logger.error(f"Stock service relay error: {e}")
+    # Check if requested store is in user's allowed stores
+    return store_id in user_store_ids
 
 
-async def _handle_client_messages(
-    client_ws: WebSocket,
-    stock_ws: websockets.WebSocketClientProtocol,
-    store_id: int
-):
+def _filter_data_by_permissions(data: dict, user: dict, store_id: int) -> dict:
     """
-    Forward messages from client to Stock service (if any).
+    Filter aggregated data based on user permissions.
+
+    For non-admin users, only show data they have access to.
 
     Args:
-        client_ws: Client WebSocket connection
-        stock_ws: Stock service WebSocket connection
-        store_id: Store ID being monitored
+        data: Initial aggregated data
+        user: Decoded JWT token payload
+        store_id: Store ID being accessed
+
+    Returns:
+        Filtered data dictionary
     """
-    try:
-        while True:
-            # Receive message from client
-            data = await client_ws.receive_text()
+    # Admins see everything
+    if user.get("is_admin"):
+        return data
 
-            # Forward to stock service
-            await stock_ws.send(data)
-            logger.debug(f"Forwarded client message to stock service for store {store_id}")
+    # For regular users, ensure store matches
+    if data.get("store", {}).get("id") != store_id:
+        # Security: Don't expose data from other stores
+        return {
+            "store": {"id": store_id, "name": "Store", "workingMode": "LEVEL"},
+            "aisles": [],
+            "bays": [],
+            "shelves": [],
+            "products": [],
+            "devices": {"total": 0, "online": 0, "offline": 0},
+            "stats": {"counts": {}, "config": {}},
+            "inventory": []
+        }
 
-    except WebSocketDisconnect:
-        logger.info(f"Client disconnected for store {store_id}")
-    except Exception as e:
-        logger.error(f"Client message relay error: {e}")
+    # TODO: Add more granular permissions (aisle-level, shelf-level) if needed
+    # For now, if user has access to store, they see all data in that store
+
+    return data
 
 
 async def _websocket_handler(
     websocket: WebSocket,
     store_id: int,
     token: Optional[str],
-    endpoint_type: str  # "dashboard" or "events"
+    endpoint_type: str
 ):
     """
-    Core WebSocket handler logic.
+    Core WebSocket handler with connection pooling and access control.
+
+    Flow:
+    1. Authenticate user
+    2. Check store access
+    3. Get/create connection pool for store
+    4. Add client to pool (shares ONE Stock WS connection)
+    5. Send initial data (cached or fresh)
+    6. Client receives broadcasts from pool
 
     Args:
         websocket: Client WebSocket connection
@@ -118,7 +112,7 @@ async def _websocket_handler(
         token: Authentication token
         endpoint_type: Type of endpoint ("dashboard" or "events")
     """
-    # --- Authenticate ---
+    # --- 1. Authenticate ---
     auth_token = token
     if not auth_token:
         auth_header = websocket.headers.get("authorization")
@@ -142,78 +136,91 @@ async def _websocket_handler(
         await websocket.close(code=1008, reason="Invalid token")
         return
 
-    # Accept connection
-    logger.info(f"🔌 WebSocket accepted: store {store_id}, user {user.get('sub')}, {endpoint_type}")
+    # --- 2. Check store access ---
+    if not _check_store_access(user, store_id):
+        logger.warning(
+            f"WebSocket rejected: Access denied to store {store_id} "
+            f"for user {user.get('sub')} ({endpoint_type})"
+        )
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Access denied to this store")
+        return
+
+    # --- 3. Accept connection ---
+    logger.info(
+        f"🔌 WebSocket accepted: store {store_id}, user {user.get('sub')} "
+        f"(admin={user.get('is_admin')}), {endpoint_type}"
+    )
     await websocket.accept()
 
     try:
-        # 1. Send initial aggregated data
-        logger.info(f"Sending initial data for store {store_id} ({endpoint_type})")
+        # --- 4. Get WebSocket manager ---
+        ws_manager = websocket.app.state.ws_manager
 
-        http_client = websocket.app.state.http_client
-        aggregator = DataAggregator(http_client, auth_token)
+        # --- 5. Check cache for initial data ---
+        cached_data = ws_manager.initial_data_cache.get(store_id)
 
-        initial_data = await aggregator.aggregate_initial_data(store_id)
+        if cached_data:
+            logger.info(f"Using cached initial data for store {store_id}")
+            initial_data = cached_data
+        else:
+            # --- 6. Fetch fresh initial data ---
+            logger.info(f"Fetching fresh initial data for store {store_id} ({endpoint_type})")
+            http_client = websocket.app.state.http_client
+            aggregator = DataAggregator(http_client, auth_token)
 
+            initial_data = await aggregator.aggregate_initial_data(store_id)
+
+            # Cache for 30 seconds
+            ws_manager.initial_data_cache.set(store_id, initial_data)
+            logger.info(f"Cached initial data for store {store_id}")
+
+        # --- 7. Filter data by user permissions ---
+        filtered_data = _filter_data_by_permissions(initial_data, user, store_id)
+
+        # --- 8. Send initial data ---
         await websocket.send_json({
             "type": "initial_data",
             "storeId": store_id,
-            "data": initial_data
+            "data": filtered_data
         })
-
         logger.info(f"✓ Initial data sent for store {store_id}")
 
-        # 2. Connect to Stock service WebSocket for real-time updates
-        stock_ws_url = _get_stock_ws_url()
-        logger.info(f"Connecting to stock service: {stock_ws_url}")
+        # --- 9. Add client to connection pool ---
+        # This will create/reuse a shared Stock WebSocket connection
+        await ws_manager.add_client(store_id, websocket, auth_token)
+        logger.info(f"Client added to broadcast pool for store {store_id}")
 
-        extra_headers = {"Authorization": f"Bearer {auth_token}"}
+        # --- 10. Keep connection alive (pool handles broadcasts) ---
+        # The WebSocketManager will broadcast Stock updates to all clients
+        # We just need to keep this connection open
+        try:
+            while True:
+                # Wait for client disconnect or messages
+                data = await websocket.receive_text()
+                # Client shouldn't send messages (read-only for now)
+                logger.debug(f"Received message from client (store {store_id}): {data}")
+        except WebSocketDisconnect:
+            logger.info(f"Client disconnected: store {store_id}, {endpoint_type}")
 
-        async with websockets.connect(
-            f"{stock_ws_url}?token={auth_token}",
-            additional_headers=extra_headers,
-            ping_interval=20,
-            ping_timeout=10,
-            open_timeout=10,
-        ) as stock_ws:
-
-            # Subscribe to store events
-            await stock_ws.send(json.dumps({
-                "action": "subscribe",
-                "filters": {"storeId": store_id},
-            }))
-
-            logger.info(f"✓ Subscribed to stock updates for store {store_id}")
-
-            # 3. Run bidirectional relay
-            relay_tasks = [
-                asyncio.create_task(_forward_stock_updates(stock_ws, websocket, store_id)),
-                asyncio.create_task(_handle_client_messages(websocket, stock_ws, store_id)),
-            ]
-
-            # Wait for either task to complete (disconnect)
-            done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
-
-            # Cancel remaining tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-    except WebSocketDisconnect:
-        logger.info(f"Client disconnected: store {store_id}, {endpoint_type}")
     except Exception as e:
-        logger.error(f"WebSocket error (store {store_id}, {endpoint_type}): {e}")
+        logger.error(f"WebSocket error (store {store_id}, {endpoint_type}): {e}", exc_info=True)
         try:
             await websocket.send_json({
                 "type": "error",
-                "message": "Service unavailable - real-time updates disabled"
+                "message": "Service error - please reconnect"
             })
         except Exception:
             pass
     finally:
+        # --- 11. Remove client from pool ---
+        try:
+            ws_manager = websocket.app.state.ws_manager
+            await ws_manager.remove_client(store_id, websocket)
+            logger.info(f"Client removed from pool: store {store_id}, {endpoint_type}")
+        except Exception as e:
+            logger.error(f"Error removing client from pool: {e}")
+
         try:
             await websocket.close()
         except Exception:
@@ -228,9 +235,15 @@ async def websocket_dashboard(
     token: Optional[str] = Query(None)
 ):
     """
-    WebSocket endpoint for dashboard page.
+    WebSocket endpoint for dashboard page with connection pooling.
 
-    Provides complete initial data followed by real-time updates for:
+    Features:
+    - Single Stock WS per store (shared by all dashboard clients)
+    - Cached initial data (30s TTL)
+    - Access control (users can only access their stores)
+    - Real-time broadcasts to all connected clients
+
+    Provides:
     - Store configuration
     - Aisles, bays, shelves structure
     - Products list
@@ -238,11 +251,6 @@ async def websocket_dashboard(
     - Stock statistics
     - Inventory levels
     - Real-time stock events
-
-    Args:
-        websocket: WebSocket connection
-        store_id: Store ID to monitor
-        token: Optional bearer token (can also use cookie or header)
     """
     await _websocket_handler(websocket, store_id, token, "dashboard")
 
@@ -254,16 +262,39 @@ async def websocket_events(
     token: Optional[str] = Query(None)
 ):
     """
-    WebSocket endpoint for retail events page.
+    WebSocket endpoint for retail events page with connection pooling.
 
-    Provides complete initial data followed by real-time updates for:
+    Features:
+    - Single Stock WS per store (shared by all events clients)
+    - Cached initial data (30s TTL)
+    - Access control (users can only access their stores)
+    - Real-time broadcasts to all connected clients
+
+    Provides:
     - Stock statistics and configuration
     - Restock needs (filtered inventory)
     - Real-time stock events
-
-    Args:
-        websocket: WebSocket connection
-        store_id: Store ID to monitor
-        token: Optional bearer token (can also use cookie or header)
     """
     await _websocket_handler(websocket, store_id, token, "events")
+
+
+@router.get("/stats")
+async def websocket_stats(request):
+    """
+    Get WebSocket manager statistics.
+
+    Shows:
+    - Total connection pools
+    - Total connected clients
+    - Clients per store
+    - Cache size
+
+    Useful for monitoring and debugging.
+    """
+    try:
+        ws_manager = request.app.state.ws_manager
+        stats = ws_manager.get_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get statistics")

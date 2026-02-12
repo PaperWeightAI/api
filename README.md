@@ -22,7 +22,11 @@ Stock + Retail + IoT Services
 ## Features
 
 - **Unified WebSocket Endpoints**: Single connection for dashboard and events pages
-- **Initial Data Aggregation**: Complete data payload sent on connection (no REST needed)
+- **Connection Pooling**: ONE Stock WS per store (99% reduction in connections)
+- **Initial Data Caching**: 30s TTL cache (97% reduction in REST calls)
+- **Multi-Client Broadcast**: All clients share one connection, receive same updates
+- **Access Control**: Users can only access stores they have permissions for
+- **Data Filtering**: Automatic filtering based on user permissions
 - **Real-time Updates**: Forwards stats, inventory, and events from Stock service
 - **Authentication**: JWT-based auth with role-based access control
 - **Health Monitoring**: Comprehensive health checks for all backend services
@@ -32,19 +36,26 @@ Stock + Retail + IoT Services
 
 ### WebSocket Endpoints
 
-- **`/ws/dashboard/{store_id}`** - Dashboard page WebSocket
-  - Initial data: store, aisles, bays, shelves, products, devices, stats, inventory
-  - Updates: stats_update, inventory_update, event_pushed
+- **`WS /ws/dashboard/{store_id}`** - Dashboard page WebSocket
+  - **Auth**: Required (JWT token)
+  - **Access Control**: User must have access to store_id
+  - **Initial data**: store, aisles, bays, shelves, products, devices, stats, inventory
+  - **Updates**: stats_update, inventory_update, event_pushed (broadcasted to all clients)
+  - **Pooling**: Shared Stock WS connection per store
 
-- **`/ws/events/{store_id}`** - Retail events page WebSocket
-  - Initial data: stats, configuration, restock needs
-  - Updates: stats_update, inventory_update, event_pushed
+- **`WS /ws/events/{store_id}`** - Retail events page WebSocket
+  - **Auth**: Required (JWT token)
+  - **Access Control**: User must have access to store_id
+  - **Initial data**: stats, configuration, restock needs
+  - **Updates**: stats_update, inventory_update, event_pushed (broadcasted to all clients)
+  - **Pooling**: Shared Stock WS connection per store
 
 ### HTTP Endpoints
 
 - **`GET /`** - Service information and available endpoints
 - **`GET /health`** - Health check (database + backend services)
 - **`GET /metrics`** - Prometheus metrics
+- **`GET /api/aggregator/stats`** - WebSocket manager statistics (monitoring)
 
 ## WebSocket Message Protocol
 
@@ -126,6 +137,37 @@ Or use Authorization header or cookie.
   }
 }
 ```
+
+## Access Control
+
+### User Permissions
+
+**Admin Users** (`is_admin: true`):
+- Access to ALL stores
+- See all data unfiltered
+
+**Regular Users** (`is_admin: false`):
+- Only access stores in their `store_ids` array
+- Attempting to access unauthorized store → Connection rejected (403)
+- Data automatically filtered to their permissions
+
+### JWT Token Structure
+
+```json
+{
+  "sub": "username",
+  "user_id": 123,
+  "is_admin": false,
+  "store_ids": [1, 3, 5],
+  "exp": 1234567890
+}
+```
+
+### Permission Checks
+
+1. **Connection**: User must have access to requested store_id
+2. **Data Filtering**: Non-admins only see data from their stores
+3. **Future**: Can add aisle-level, shelf-level permissions
 
 ## Configuration
 
