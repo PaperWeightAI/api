@@ -1,0 +1,45 @@
+# Web Framework
+fastapi==0.121.3
+uvicorn==0.38.0
+
+# Database
+sqlalchemy==2.0.44
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+aiosqlite>=0.20.0
+
+# Validation
+pydantic==2.10.3
+pydantic-settings==2.11.0
+
+# Authentication
+authlib==1.6.5
+joserfc==1.0.0
+
+# HTTP Client
+httpx==0.27.0
+aiohttp>=3.9.0
+
+# WebSocket
+websockets==14.0
+
+# Observability
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-instrumentation-fastapi==0.45b0
+prometheus-client==0.20.0
+
+# Rate limiting
+slowapi==0.1.9
+
+# InfluxDB (optional telemetry)
+influxdb-client>=1.38.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# Utilities
+python-dotenv==1.1.1
+greenlet>=3.0.0
