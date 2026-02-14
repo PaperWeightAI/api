@@ -149,9 +149,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # ===== SHUTDOWN =====
     logger.info(f"🛑 Shutting down {SERVICE_NAME}")
 
-    # Stop token refresh
+    # Gracefully shut down all WebSocket pools and token refresh
     if hasattr(app.state, 'ws_manager'):
-        await app.state.ws_manager.stop_token_refresh()
+        await app.state.ws_manager.shutdown()
 
     # Close HTTP client
     if hasattr(app.state, 'http_client'):

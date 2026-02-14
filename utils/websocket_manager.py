@@ -47,6 +47,7 @@ WS_INITIAL_DATA_CACHE_TTL = _int_env("WS_INITIAL_DATA_CACHE_TTL", 30, 5, 600)
 WS_MAX_CLIENTS_PER_POOL = _int_env("WS_MAX_CLIENTS_PER_POOL", 500, 1, 10_000)
 WS_SEND_TIMEOUT = _float_env("WS_SEND_TIMEOUT", 5.0, 1.0, 60.0)  # per-client send timeout
 WS_STOCK_UPDATE_INTERVAL = _float_env("WS_STOCK_UPDATE_INTERVAL", 1.0, 0.1, 60.0)
+WS_MAX_RECONNECT_EXPONENT = 10  # cap 2^N to avoid overflow
 
 
 class StoreConnectionPool:
@@ -77,6 +78,30 @@ class StoreConnectionPool:
         # Stock snapshot accumulator (flushed at WS_STOCK_UPDATE_INTERVAL)
         self._stock_snapshots: dict[int, dict] = {}
         self._stock_flush_task: asyncio.Task | None = None
+
+        # Background task tracking (prevents orphaned tasks)
+        self._background_tasks: set[asyncio.Task] = set()
+
+        # Single cleanup scheduler (prevents duplicate cleanup tasks)
+        self._cleanup_scheduled = False
+
+    def _create_tracked_task(self, coro, name: str = "pool_task") -> asyncio.Task:
+        """Create and track a background task with error logging."""
+        task = asyncio.create_task(coro, name=f"{name}_store_{self.store_id}")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(
+                "Background task %s failed for store %s: %s",
+                task.get_name(), self.store_id, exc,
+            )
 
     @property
     def clients(self) -> set[WebSocket]:
@@ -110,7 +135,8 @@ class StoreConnectionPool:
         logger.info(
             "Client added to store %s pool [%s] (total: %s)", self.store_id, channel, total
         )
-        if total == 1 and not self.is_connected:
+        # Connect if first client and not already connecting/connected
+        if total == 1 and not self.is_connected and not self.is_connecting:
             await self.connect_to_stock()
         return True
 
@@ -123,20 +149,24 @@ class StoreConnectionPool:
         remaining = self._client_count()
         logger.info(f"Client removed from store {self.store_id} pool (remaining: {remaining})")
 
-        if remaining == 0:
+        if remaining == 0 and not self._cleanup_scheduled:
+            self._cleanup_scheduled = True
             logger.info(
                 "No clients for store %s, scheduling cleanup in %ss",
                 self.store_id,
                 WS_CLEANUP_GRACE_SECONDS,
             )
-            asyncio.create_task(self._delayed_cleanup())
+            self._create_tracked_task(self._delayed_cleanup(), "cleanup")
 
     async def _delayed_cleanup(self) -> None:
         """Wait WS_CLEANUP_GRACE_SECONDS before closing Stock WS (allows quick reconnects)."""
-        await asyncio.sleep(WS_CLEANUP_GRACE_SECONDS)
-        if self._client_count() == 0:
-            logger.info("Closing Stock WS for store %s (no clients)", self.store_id)
-            await self.disconnect_from_stock()
+        try:
+            await asyncio.sleep(WS_CLEANUP_GRACE_SECONDS)
+            if self._client_count() == 0:
+                logger.info("Closing Stock WS for store %s (no clients)", self.store_id)
+                await self.disconnect_from_stock()
+        finally:
+            self._cleanup_scheduled = False
 
     async def connect_to_stock(self):
         """Connect to Stock service WebSocket."""
@@ -144,12 +174,13 @@ class StoreConnectionPool:
             return
 
         self.is_connecting = True
+        current_token = self.token  # Capture token at connection time
         logger.info(f"Connecting to Stock service for store {self.store_id}")
 
         try:
-            extra_headers = {"Authorization": f"Bearer {self.token}"}
+            extra_headers = {"Authorization": f"Bearer {current_token}"}
             self.stock_ws = await websockets.connect(
-                f"{self.stock_ws_url}?token={self.token}",
+                f"{self.stock_ws_url}?token={current_token}",
                 additional_headers=extra_headers,
                 ping_interval=WS_PING_INTERVAL,
                 ping_timeout=WS_PING_TIMEOUT,
@@ -165,7 +196,7 @@ class StoreConnectionPool:
             self.is_connected = True
             self.is_connecting = False
             self.reconnect_attempts = 0
-            logger.info(f"✓ Connected to Stock service for store {self.store_id}")
+            logger.info(f"Connected to Stock service for store {self.store_id}")
 
             # Start broadcast task
             self.stock_ws_task = asyncio.create_task(self._broadcast_loop())
@@ -176,8 +207,9 @@ class StoreConnectionPool:
             self.is_connected = False
 
             self.reconnect_attempts += 1
+            capped = min(self.reconnect_attempts, WS_MAX_RECONNECT_EXPONENT)
             delay = min(
-                WS_RECONNECT_BASE_DELAY * (2 ** self.reconnect_attempts),
+                WS_RECONNECT_BASE_DELAY * (2 ** capped),
                 WS_RECONNECT_MAX_DELAY,
             )
             logger.info("Retrying Stock connection in %ss", delay)
@@ -202,7 +234,10 @@ class StoreConnectionPool:
                 pass
 
         if self.stock_ws:
-            await self.stock_ws.close()
+            try:
+                await self.stock_ws.close()
+            except Exception:
+                pass
             self.stock_ws = None
 
         self.is_connected = False
@@ -259,7 +294,7 @@ class StoreConnectionPool:
         if not self.events_clients:
             return
         payload = json.dumps({"type": "event_pushed", "data": event})
-        asyncio.create_task(self.broadcast_events(payload))
+        self._create_tracked_task(self.broadcast_events(payload), "event_broadcast")
 
     def receive_stock_update(self, event: dict) -> None:
         """Accumulate a stock event into the snapshot buffer (flushed periodically)."""
@@ -329,6 +364,7 @@ class StoreConnectionPool:
             await self.connect_to_stock()
         except Exception as e:
             logger.error(f"Broadcast loop error for store {self.store_id}: {e}")
+            self.is_connected = False
 
 
 class InitialDataCache:
@@ -416,9 +452,9 @@ class WebSocketManager:
         while True:
             await asyncio.sleep(20 * 60)
             await self._fetch_service_token()
-            # Push refreshed token to all existing pools
+            # Snapshot pools to avoid dict iteration issues during modification
             if self._service_token:
-                for pool in self.pools.values():
+                for pool in list(self.pools.values()):
                     pool.token = self._service_token
 
     async def _fetch_service_token(self) -> None:
@@ -465,11 +501,22 @@ class WebSocketManager:
         if store_id in self.pools:
             await self.pools[store_id].remove_client(client)
 
+    async def shutdown(self) -> None:
+        """Gracefully disconnect all pools and cancel background tasks."""
+        await self.stop_token_refresh()
+        for store_id, pool in list(self.pools.items()):
+            await pool.disconnect_from_stock()
+            # Cancel any remaining tracked tasks
+            for task in list(pool._background_tasks):
+                task.cancel()
+        self.pools.clear()
+        logger.info("All WebSocket pools shut down")
+
     async def cleanup_empty_pools(self):
         """Remove pools with no clients (called periodically)."""
         empty_stores = [
             store_id for store_id, pool in self.pools.items()
-            if len(pool.clients) == 0 and not pool.is_connected
+            if pool._client_count() == 0 and not pool.is_connected
         ]
         for store_id in empty_stores:
             logger.info(f"Removing empty pool for store {store_id}")
