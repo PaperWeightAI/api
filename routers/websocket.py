@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-WebSocket Router - Unified WebSocket endpoint with connection pooling
+WebSocket Router - Channel-separated WebSocket endpoints with connection pooling
 
-Provides efficient WebSocket endpoints that:
-1. Accept client connections with authentication
-2. Check user access to requested store
-3. Send filtered initial data based on user permissions
-4. Use connection pooling (ONE Stock WS per store, broadcast to all clients)
-5. Forward real-time updates with access control
-
-Endpoints:
-- /ws/dashboard/{store_id} - Dashboard page WebSocket
-- /ws/events/{store_id} - Retail events page WebSocket
+Three specialized channels per store:
+- /ws/events/{store_id} - Critical events only (THEFT, RESTOCK) — immediate delivery
+- /ws/stock/{store_id} - Stock state snapshots — accumulated, flushed at configurable interval
+- /ws/store/{store_id} - Store metadata (initial_data, stats_update, inventory_update)
 """
 
+import json
 import logging
+import os
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
 
 from common.auth import OAuth2BearerTokenValidator
 from services.aggregator import DataAggregator
 
 logger = logging.getLogger("api.websocket")
 router = APIRouter(tags=["websocket"])
+
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 
 def _check_store_access(user: dict, store_id: int) -> bool:
@@ -129,12 +127,24 @@ async def _websocket_handler(
         return
 
     validator = OAuth2BearerTokenValidator()
-    user = validator.authenticate_token(auth_token)
-    if not user:
-        logger.warning(f"WebSocket rejected: Invalid token (store {store_id}, {endpoint_type})")
+    token_obj = validator.authenticate_token(auth_token)
+    if not token_obj:
+        logger.warning(
+            f"WebSocket rejected: Invalid token (store {store_id}, {endpoint_type}). "
+            "Ensure API has the same JWT public key as the login service and token is not expired."
+        )
         await websocket.accept()
         await websocket.close(code=1008, reason="Invalid token")
         return
+
+    # Convert TokenObject to dict for helper functions
+    user = {
+        'sub': token_obj.username,
+        'user_id': token_obj.user_id,
+        'is_admin': token_obj.is_admin,
+        'is_operator': token_obj.is_operator,
+        **token_obj.claims
+    }
 
     # --- 2. Check store access ---
     if not _check_store_access(user, store_id):
@@ -187,9 +197,16 @@ async def _websocket_handler(
         logger.info(f"✓ Initial data sent for store {store_id}")
 
         # --- 9. Add client to connection pool ---
-        # This will create/reuse a shared Stock WebSocket connection
-        await ws_manager.add_client(store_id, websocket, auth_token)
-        logger.info(f"Client added to broadcast pool for store {store_id}")
+        channel = endpoint_type  # "events", "stock", or "store"
+        added = await ws_manager.add_client(store_id, websocket, auth_token, channel=channel)
+        if not added:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Server at capacity for this store — try again later",
+            })
+            await websocket.close(code=1013, reason="Try again later")
+            return
+        logger.info("Client added to broadcast pool for store %s", store_id)
 
         # --- 10. Keep connection alive (pool handles broadcasts) ---
         # The WebSocketManager will broadcast Stock updates to all clients
@@ -228,33 +245,6 @@ async def _websocket_handler(
         logger.info(f"🔌 WebSocket closed: store {store_id}, {endpoint_type}")
 
 
-@router.websocket("/ws/dashboard/{store_id}")
-async def websocket_dashboard(
-    websocket: WebSocket,
-    store_id: int,
-    token: Optional[str] = Query(None)
-):
-    """
-    WebSocket endpoint for dashboard page with connection pooling.
-
-    Features:
-    - Single Stock WS per store (shared by all dashboard clients)
-    - Cached initial data (30s TTL)
-    - Access control (users can only access their stores)
-    - Real-time broadcasts to all connected clients
-
-    Provides:
-    - Store configuration
-    - Aisles, bays, shelves structure
-    - Products list
-    - Device counts
-    - Stock statistics
-    - Inventory levels
-    - Real-time stock events
-    """
-    await _websocket_handler(websocket, store_id, token, "dashboard")
-
-
 @router.websocket("/ws/events/{store_id}")
 async def websocket_events(
     websocket: WebSocket,
@@ -262,20 +252,36 @@ async def websocket_events(
     token: Optional[str] = Query(None)
 ):
     """
-    WebSocket endpoint for retail events page with connection pooling.
-
-    Features:
-    - Single Stock WS per store (shared by all events clients)
-    - Cached initial data (30s TTL)
-    - Access control (users can only access their stores)
-    - Real-time broadcasts to all connected clients
-
-    Provides:
-    - Stock statistics and configuration
-    - Restock needs (filtered inventory)
-    - Real-time stock events
+    WebSocket endpoint for critical events (THEFT, RESTOCK only).
+    Events are delivered immediately with no accumulation.
     """
     await _websocket_handler(websocket, store_id, token, "events")
+
+
+@router.websocket("/ws/stock/{store_id}")
+async def websocket_stock(
+    websocket: WebSocket,
+    store_id: int,
+    token: Optional[str] = Query(None)
+):
+    """
+    WebSocket endpoint for stock state snapshots.
+    Accumulated per-product state flushed at WS_STOCK_UPDATE_INTERVAL (default 1s).
+    """
+    await _websocket_handler(websocket, store_id, token, "stock")
+
+
+@router.websocket("/ws/store/{store_id}")
+async def websocket_store(
+    websocket: WebSocket,
+    store_id: int,
+    token: Optional[str] = Query(None)
+):
+    """
+    WebSocket endpoint for store metadata and retail info.
+    Provides initial_data, stats_update, inventory_update.
+    """
+    await _websocket_handler(websocket, store_id, token, "store")
 
 
 @router.get("/stats")
@@ -298,3 +304,46 @@ async def websocket_stats(request):
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to get statistics")
+
+
+@router.post("/internal/broadcast")
+async def internal_broadcast(request: Request):
+    """
+    Internal endpoint for the stock service to push events directly via HTTP.
+
+    Accepts a single event dict or a list of event dicts (batched).
+    Routes events to the appropriate channel:
+    - THEFT/RESTOCK → events_clients (immediate)
+    - Stock events → stock_clients (accumulated snapshot)
+    """
+    header_secret = request.headers.get("X-Internal-Secret")
+    if not INTERNAL_API_SECRET or header_secret != INTERNAL_API_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized internal call")
+
+    body = await request.json()
+    events = body if isinstance(body, list) else [body]
+
+    ws_manager = request.app.state.ws_manager
+    total_broadcast = 0
+
+    for event in events:
+        store_id = event.get("storeId")
+        if not store_id:
+            continue
+
+        pool = ws_manager.pools.get(store_id)
+        if not pool:
+            continue
+
+        event_type = event.get("eventType", "")
+        if event_type in ("THEFT", "RESTOCK"):
+            pool.receive_event(event)
+            total_broadcast += 1
+        elif event_type in (
+            "LEVEL_UPDATE", "STOCK_CRITICAL", "STOCK_RECOVERY",
+            "ORDER_TO_RESTOCK", "SALE",
+        ):
+            pool.receive_stock_update(event)
+            total_broadcast += 1
+
+    return {"status": "broadcast", "events": total_broadcast, "received": len(events)}

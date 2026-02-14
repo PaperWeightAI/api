@@ -216,18 +216,27 @@ class DataAggregator:
             "store_config": {}
         })
 
-        # Fetch inventory for all shelves
+        # Fetch inventory (Retail bulk, for dashboard) and restock_needs (Stock, for events page table)
         shelf_ids = [shelf.get("id") for shelf in shelves if shelf.get("id")]
-        inventory = []
-        if shelf_ids:
-            inventory = await self.fetch_inventory(shelf_ids)
-            if isinstance(inventory, Exception):
-                logger.error(f"Inventory fetch failed: {inventory}")
-                inventory = []
+
+        async def empty_list() -> list:
+            return []
+
+        inv_coro = self.fetch_inventory(shelf_ids) if shelf_ids else empty_list()
+        inv_result, restock_result = await asyncio.gather(
+            inv_coro,
+            self.fetch_restock_needs(store_id),
+        )
+        inventory = inv_result if not isinstance(inv_result, Exception) else []
+        if isinstance(inv_result, Exception):
+            logger.error(f"Inventory fetch failed: {inv_result}")
+        restock_needs = restock_result if not isinstance(restock_result, Exception) else []
+        if isinstance(restock_result, Exception):
+            logger.error(f"Restock needs fetch failed: {restock_result}")
 
         logger.info(
             f"Initial data aggregated: {len(aisles)} aisles, {len(shelves)} shelves, "
-            f"{len(products)} products, {len(inventory)} inventory items"
+            f"{len(products)} products, {len(inventory)} inventory items, {len(restock_needs)} restock items"
         )
 
         return {
@@ -238,5 +247,6 @@ class DataAggregator:
             "products": products,
             "devices": devices,
             "stats": stats,
-            "inventory": inventory
+            "inventory": inventory,
+            "restock_needs": restock_needs,
         }

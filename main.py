@@ -139,7 +139,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     stock_ws_url = STOCK_SERVICE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws/stock/events"
     ws_manager = WebSocketManager(stock_ws_url)
     app.state.ws_manager = ws_manager
-    logger.info("✓ WebSocket manager initialized (connection pooling enabled)")
+    await ws_manager.start_token_refresh(http_client, startup_token)
+    logger.info("✓ WebSocket manager initialized (connection pooling + token refresh)")
 
     logger.info(f"✓ {SERVICE_NAME} is ready")
 
@@ -147,6 +148,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     # ===== SHUTDOWN =====
     logger.info(f"🛑 Shutting down {SERVICE_NAME}")
+
+    # Stop token refresh
+    if hasattr(app.state, 'ws_manager'):
+        await app.state.ws_manager.stop_token_refresh()
 
     # Close HTTP client
     if hasattr(app.state, 'http_client'):
@@ -194,8 +199,9 @@ async def root():
         "version": SERVICE_VERSION,
         "status": "operational",
         "endpoints": {
-            "websocket_dashboard": "/ws/dashboard/{store_id}",
             "websocket_events": "/ws/events/{store_id}",
+            "websocket_stock": "/ws/stock/{store_id}",
+            "websocket_store": "/ws/store/{store_id}",
             "health": "/health",
             "metrics": "/metrics"
         }

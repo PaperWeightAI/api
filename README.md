@@ -122,21 +122,22 @@ Or use Authorization header or cookie.
 }
 ```
 
-**Real-time Event** (on occurrence):
+**Real-time Event** (on occurrence; theft and restock have dedicated channels for ASAP delivery):
 ```json
 {
   "type": "event_pushed",
+  "channel": "store/1/theft",
   "storeId": 1,
   "data": {
-    "eventType": "STOCK_DEPLETED",
+    "eventType": "THEFT",
     "shelfId": 1,
     "productId": 10,
-    "stockState": "OUT_OF_STOCK",
     "productName": "Product A",
     "timestamp": "2026-02-12T10:30:00Z"
   }
 }
 ```
+Channels: `store/{id}/events` (all), `store/{id}/theft`, `store/{id}/restock`, `store/{id}/stock_state`, `store/{id}/shop_info` (future). Frontends can subscribe only to the channels they need.
 
 ## Access Control
 
@@ -196,11 +197,17 @@ RETAIL_SERVICE_URL=http://retail:8000
 IOT_SERVICE_URL=http://iot:8000
 ```
 
-### WebSocket Configuration
+### WebSocket Configuration (API aggregator – flexible, efficient, safe)
 ```bash
-WS_PUSH_INTERVAL=1.0          # Stock service push interval (seconds)
-WS_PING_INTERVAL=20           # WebSocket ping interval
-WS_PING_TIMEOUT=10            # WebSocket ping timeout
+WS_PING_INTERVAL=20           # Ping interval (seconds)
+WS_PING_TIMEOUT=10            # Pong timeout before disconnect
+WS_OPEN_TIMEOUT=10            # Stock WS connection timeout
+WS_CLEANUP_GRACE_SECONDS=30   # Delay before closing idle Stock WS
+WS_RECONNECT_BASE_DELAY=2.0   # Reconnect backoff base (seconds)
+WS_RECONNECT_MAX_DELAY=30.0   # Reconnect backoff cap
+WS_INITIAL_DATA_CACHE_TTL=30  # Initial data cache TTL (seconds)
+WS_MAX_CLIENTS_PER_POOL=500   # Max clients per store (reject when full)
+WS_SEND_TIMEOUT=5.0           # Per-client send timeout (slow client protection)
 ```
 
 ## Development

@@ -88,6 +88,7 @@ def mock_aggregator():
             "products": [],
             "devices": {"total": 0, "online": 0, "offline": 0},
             "stats": {"counts": {}, "config": {}},
-            "inventory": []
+            "inventory": [],
+            "restock_needs": [],
         })
         yield instance
