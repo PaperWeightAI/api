@@ -290,12 +290,12 @@ class TestInternalBroadcastEndpoint:
         client = TestClient(app)
         resp = client.post(
             "/internal/broadcast",
-            json={"storeId": 1, "eventType": "SALE", "productId": 10},
+            json={"storeId": 1, "eventType": "LEVEL_UPDATE", "productId": 10},
             headers={"X-Internal-Secret": "test-secret"},
         )
         assert resp.status_code == 200
 
-        # SALE goes to accumulator, not immediately sent
+        # LEVEL_UPDATE goes to accumulator, not immediately sent
         assert 10 in pool._stock_snapshots
         # Stock client shouldn't have been called yet (waiting for flush)
         ws_stock.send_text.assert_not_called()
@@ -319,7 +319,6 @@ class TestInternalBroadcastEndpoint:
             ("STOCK_CRITICAL", True),
             ("STOCK_RECOVERY", True),
             ("ORDER_TO_RESTOCK", True),
-            ("SALE", True),
             ("UNKNOWN_TYPE", False),
         ]
 
