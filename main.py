@@ -37,6 +37,10 @@ from fastapi import Depends
 from routers import websocket
 from utils.websocket_manager import WebSocketManager
 
+# MCP server
+from mcp_server import create_mcp_server
+from mcp_server.dependencies import deps as mcp_deps
+
 # Configure logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -142,9 +146,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await ws_manager.start_token_refresh(http_client, startup_token)
     logger.info("✓ WebSocket manager initialized (connection pooling + token refresh)")
 
+    # 6. Initialize MCP server dependencies
+    mcp_deps.http_client = http_client
+    mcp_deps.auth_token = startup_token
+    mcp_deps.ws_manager = ws_manager
+    mcp_deps.stock_service_url = STOCK_SERVICE_URL
+    mcp_deps.retail_service_url = RETAIL_SERVICE_URL
+    mcp_deps.iot_service_url = IOT_SERVICE_URL
+    mcp_deps.internal_api_secret = INTERNAL_API_SECRET
+    logger.info("✓ MCP server dependencies initialized")
+
     logger.info(f"✓ {SERVICE_NAME} is ready")
 
-    yield
+    # Run MCP session manager for the lifetime of the app
+    mcp_server = app.state.mcp_server
+    async with mcp_server.session_manager.run():
+        yield
 
     # ===== SHUTDOWN =====
     logger.info(f"🛑 Shutting down {SERVICE_NAME}")
@@ -203,7 +220,8 @@ async def root():
             "websocket_stock": "/ws/stock/{store_id}",
             "websocket_store": "/ws/store/{store_id}",
             "health": "/health",
-            "metrics": "/metrics"
+            "metrics": "/metrics",
+            "mcp": "/mcp"
         }
     }
 
@@ -269,6 +287,11 @@ async def health_check(request: Request, db: AsyncSession = Depends(get_async_db
 
     return JSONResponse(status_code=status_code, content=health_status)
 
+
+# Mount MCP server (Streamable HTTP transport)
+mcp_server = create_mcp_server()
+app.state.mcp_server = mcp_server
+app.mount("/mcp", mcp_server.streamable_http_app())
 
 # Mount Prometheus metrics
 app.mount("/metrics", make_asgi_app())
