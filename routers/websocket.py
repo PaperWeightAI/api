@@ -340,7 +340,7 @@ async def internal_broadcast(request: Request):
             pool.receive_event(event)
             total_broadcast += 1
         elif event_type in (
-            "LEVEL_UPDATE", "STOCK_CRITICAL", "STOCK_RECOVERY",
+            "LEVEL_UPDATE", "STOCK_UPDATE", "STOCK_CRITICAL", "STOCK_RECOVERY",
             "ORDER_TO_RESTOCK",
         ):
             pool.receive_stock_update(event)
