@@ -310,6 +310,7 @@ class StoreConnectionPool:
             "stockPercentageAfter": event.get("stockPercentageAfter"),
             "levelPercentageAfter": event.get("levelPercentageAfter"),
             "countPercentageAfter": event.get("countPercentageAfter"),
+            "countEstimate": event.get("countEstimate"),
             "lastEvent": event.get("eventType"),
             "timestamp": event.get("timestamp"),
         }
