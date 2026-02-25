@@ -184,11 +184,13 @@ LOG_LEVEL=INFO
 
 ### Authentication
 ```bash
-JWT_SECRET_KEY=your-secret-key
 JWT_PUBLIC_KEY_PATH=jwt_public_key.pem
 LOGIN_SERVICE_URL=http://login:8005
-INTERNAL_API_SECRET=your-internal-secret
+SERVICE_CLIENT_ID=api-service
+SERVICE_CLIENT_SECRET=your-service-secret
 ```
+
+The API service authenticates to backend services using OAuth2 `client_credentials` grant via `ServiceAuthClient`. Tokens are cached and auto-refreshed.
 
 ### Backend Services
 ```bash
@@ -376,7 +378,7 @@ Prometheus metrics available at `/metrics`:
 ### Real-time Updates Not Working
 - Verify Stock service WebSocket is operational
 - Check Stock service URL configuration
-- Ensure internal API secret matches between services
+- Verify service credentials are configured (`SERVICE_CLIENT_ID`, `SERVICE_CLIENT_SECRET`)
 
 ## Contributing
 

@@ -423,18 +423,16 @@ class WebSocketManager:
         # Token refresh (initialized by start_token_refresh)
         self._service_token: str | None = None
         self._token_refresh_task: asyncio.Task | None = None
-        self._http_client: httpx.AsyncClient | None = None
-        self._login_url = os.getenv("LOGIN_SERVICE_URL", "http://login:8005")
-        self._admin_user = os.getenv("ADMIN_USERNAME", "admin")
-        self._admin_pass = os.getenv("ADMIN_PASSWORD", "admin")
+        self._service_auth = None  # ServiceAuthClient, set by start_token_refresh
 
     # ---- Token Refresh ----
 
     async def start_token_refresh(
-        self, http_client: httpx.AsyncClient, initial_token: str | None
+        self, http_client: httpx.AsyncClient, initial_token: str | None,
+        service_auth=None,
     ) -> None:
         """Initialize the service token and start the refresh loop."""
-        self._http_client = http_client
+        self._service_auth = service_auth
         self._service_token = initial_token
         self._token_refresh_task = asyncio.create_task(self._token_refresh_loop())
 
@@ -448,36 +446,16 @@ class WebSocketManager:
                 pass
 
     async def _token_refresh_loop(self) -> None:
-        """Refresh the service token every 20 min (tokens expire at 30 min)."""
+        """Refresh the service token periodically (tokens expire at 60 min for services)."""
         while True:
             await asyncio.sleep(20 * 60)
-            await self._fetch_service_token()
-            # Snapshot pools to avoid dict iteration issues during modification
-            if self._service_token:
-                for pool in list(self.pools.values()):
-                    pool.token = self._service_token
-
-    async def _fetch_service_token(self) -> None:
-        """Fetch a fresh token from the login service."""
-        if not self._http_client:
-            return
-        try:
-            resp = await self._http_client.post(
-                f"{self._login_url}/oauth/token",
-                data={
-                    "grant_type": "password",
-                    "username": self._admin_user,
-                    "password": self._admin_pass,
-                },
-                timeout=10.0,
-            )
-            if resp.status_code == 200:
-                self._service_token = resp.json().get("access_token")
-                logger.info("Service token refreshed")
-            else:
-                logger.warning("Token refresh failed: %s", resp.status_code)
-        except Exception as e:
-            logger.warning("Token refresh error: %s", e)
+            if self._service_auth:
+                new_token = await self._service_auth.get_token()
+                if new_token:
+                    self._service_token = new_token
+                    for pool in list(self.pools.values()):
+                        pool.token = self._service_token
+                    logger.info("[SERVICE] WebSocket manager token refreshed")
 
     # ---- Pool Management ----
 

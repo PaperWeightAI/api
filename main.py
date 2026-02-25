@@ -60,33 +60,12 @@ RETAIL_SERVICE_URL = os.getenv("RETAIL_SERVICE_URL", "http://retail:8000")
 IOT_SERVICE_URL = os.getenv("IOT_SERVICE_URL", "http://iot:8000")
 LOGIN_SERVICE_URL = os.getenv("LOGIN_SERVICE_URL", "http://login:8005")
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
+from common.auth.service_client import ServiceAuthClient
 
-async def _get_startup_token(client: httpx.AsyncClient) -> str | None:
-    """Fetch admin token from login service on startup."""
-    try:
-        logger.info(f"Fetching startup token from {LOGIN_SERVICE_URL}...")
-        response = await client.post(
-            f"{LOGIN_SERVICE_URL}/oauth/token",
-            data={
-                "grant_type": "password",
-                "username": ADMIN_USERNAME,
-                "password": ADMIN_PASSWORD
-            },
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            token = response.json().get("access_token")
-            logger.info("✓ Startup token acquired")
-            return token
-        else:
-            logger.error(f"Token fetch failed: {response.status_code} - {response.text}")
-    except Exception as e:
-        logger.error(f"Token fetch error: {e}")
-    return None
+# Service authentication via OAuth2 client_credentials grant
+_service_auth = ServiceAuthClient()
 
 
 async def _check_service_health(client: httpx.AsyncClient, service_url: str, service_name: str) -> bool:
@@ -121,15 +100,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # 2. Create shared HTTP client
     http_client = await get_http_client()
     app.state.http_client = http_client
+    _service_auth.set_http_client(http_client)
     logger.info("✓ HTTP client pool created")
 
-    # 3. Fetch startup token
-    startup_token = await _get_startup_token(http_client)
+    # 3. Fetch service token via client_credentials grant
+    startup_token = await _service_auth.get_token()
     app.state.startup_token = startup_token
+    app.state.service_auth = _service_auth
     if startup_token:
-        logger.info("✓ Startup authentication configured")
+        logger.info("✓ Service authentication configured")
     else:
-        logger.warning("⚠ No startup token - service may have limited functionality")
+        logger.warning("⚠ No service token - service may have limited functionality")
 
     # 4. Health check backend services
     await asyncio.gather(
@@ -143,7 +124,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     stock_ws_url = STOCK_SERVICE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws/stock/events"
     ws_manager = WebSocketManager(stock_ws_url)
     app.state.ws_manager = ws_manager
-    await ws_manager.start_token_refresh(http_client, startup_token)
+    await ws_manager.start_token_refresh(http_client, startup_token, service_auth=_service_auth)
     logger.info("✓ WebSocket manager initialized (connection pooling + token refresh)")
 
     # 6. Initialize MCP server dependencies
