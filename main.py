@@ -15,6 +15,7 @@ and WebSocket messages.
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -207,19 +208,32 @@ async def root():
     }
 
 
+_api_health_cache: dict | None = None
+_api_health_cache_ts: float = 0.0
+_API_HEALTH_CACHE_TTL = 900.0  # 15 minutes
+
+
 @app.get("/health")
 async def health_check(request: Request, db: AsyncSession = Depends(get_async_db)):
     """
-    Comprehensive health check.
-    Checks database connectivity and backend services.
+    Comprehensive health check with 15-minute cache.
+    Checks database connectivity and backend services in parallel.
     """
+    global _api_health_cache, _api_health_cache_ts
+
+    now = time.monotonic()
+    if _api_health_cache and (now - _api_health_cache_ts) < _API_HEALTH_CACHE_TTL:
+        return JSONResponse(
+            status_code=200 if _api_health_cache["status"] == "healthy" else 503,
+            content=_api_health_cache,
+            headers={"X-Health-Cache": "hit"},
+        )
+
     health_status = {
         "service": SERVICE_NAME,
         "status": "healthy",
         "checks": {}
     }
-
-    checks = []
 
     # Check database
     async def check_db():
@@ -266,7 +280,11 @@ async def health_check(request: Request, db: AsyncSession = Depends(get_async_db
     health_status["status"] = "healthy" if all_healthy else "degraded"
     status_code = 200 if all_healthy else 503
 
-    return JSONResponse(status_code=status_code, content=health_status)
+    # Cache the result
+    _api_health_cache = health_status
+    _api_health_cache_ts = now
+
+    return JSONResponse(status_code=status_code, content=health_status, headers={"X-Health-Cache": "miss"})
 
 
 # Mount MCP server (Streamable HTTP transport)
