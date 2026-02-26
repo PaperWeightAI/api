@@ -19,7 +19,6 @@ class MCPDependencies:
     stock_service_url: str = "http://stock:8000"
     retail_service_url: str = "http://retail:8000"
     iot_service_url: str = "http://iot:8000"
-    internal_api_secret: str = ""
 
     @property
     def headers(self) -> dict:
@@ -31,8 +30,6 @@ class MCPDependencies:
         h = {}
         if token:
             h["Authorization"] = f"Bearer {token}"
-        if self.internal_api_secret:
-            h["X-Internal-Secret"] = self.internal_api_secret
         return h
 
 

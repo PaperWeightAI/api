@@ -32,7 +32,6 @@ def _setup(transport):
     deps.stock_service_url = "http://stock"
     deps.retail_service_url = "http://retail"
     deps.iot_service_url = "http://iot"
-    deps.internal_api_secret = ""
     return httpx.AsyncClient(transport=transport)
 
 

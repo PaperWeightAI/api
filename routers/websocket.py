@@ -13,15 +13,13 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, Request, Depends
 
-from common.auth import OAuth2BearerTokenValidator
+from common.auth import OAuth2BearerTokenValidator, verify_token
 from services.aggregator import DataAggregator
 
 logger = logging.getLogger("api.websocket")
 router = APIRouter(tags=["websocket"])
-
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 
 def _check_store_access(user: dict, store_id: int) -> bool:
@@ -307,7 +305,7 @@ async def websocket_stats(request):
 
 
 @router.post("/internal/broadcast")
-async def internal_broadcast(request: Request):
+async def internal_broadcast(request: Request, _user: dict = Depends(verify_token)):
     """
     Internal endpoint for the stock service to push events directly via HTTP.
 
@@ -316,9 +314,6 @@ async def internal_broadcast(request: Request):
     - THEFT/RESTOCK → events_clients (immediate)
     - Stock events → stock_clients (accumulated snapshot)
     """
-    header_secret = request.headers.get("X-Internal-Secret")
-    if not INTERNAL_API_SECRET or header_secret != INTERNAL_API_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized internal call")
 
     body = await request.json()
     events = body if isinstance(body, list) else [body]

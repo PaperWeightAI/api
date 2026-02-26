@@ -61,8 +61,6 @@ RETAIL_SERVICE_URL = os.getenv("RETAIL_SERVICE_URL", "http://retail:8000")
 IOT_SERVICE_URL = os.getenv("IOT_SERVICE_URL", "http://iot:8000")
 LOGIN_SERVICE_URL = os.getenv("LOGIN_SERVICE_URL", "http://login:8005")
 
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
-
 from common.auth.service_client import ServiceAuthClient
 
 # Service authentication via OAuth2 client_credentials grant
@@ -135,7 +133,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     mcp_deps.stock_service_url = STOCK_SERVICE_URL
     mcp_deps.retail_service_url = RETAIL_SERVICE_URL
     mcp_deps.iot_service_url = IOT_SERVICE_URL
-    mcp_deps.internal_api_secret = INTERNAL_API_SECRET
     logger.info("✓ MCP server dependencies initialized")
 
     logger.info(f"✓ {SERVICE_NAME} is ready")
@@ -223,8 +220,10 @@ async def health_check(request: Request, db: AsyncSession = Depends(get_async_db
 
     now = time.monotonic()
     if _api_health_cache and (now - _api_health_cache_ts) < _API_HEALTH_CACHE_TTL:
+        # 503 only for truly unhealthy (database down); 200 for healthy/degraded
+        cached_code = 503 if _api_health_cache["status"] == "unhealthy" else 200
         return JSONResponse(
-            status_code=200 if _api_health_cache["status"] == "healthy" else 503,
+            status_code=cached_code,
             content=_api_health_cache,
             headers={"X-Health-Cache": "hit"},
         )
@@ -277,8 +276,21 @@ async def health_check(request: Request, db: AsyncSession = Depends(get_async_db
         if not is_healthy:
             all_healthy = False
 
-    health_status["status"] = "healthy" if all_healthy else "degraded"
-    status_code = 200 if all_healthy else 503
+    # Determine status: "healthy" (all OK), "degraded" (downstream issues),
+    # or "unhealthy" (database down — can't serve requests at all)
+    db_healthy = health_status["checks"].get("database", {}).get("status") == "healthy"
+    if all_healthy:
+        health_status["status"] = "healthy"
+    elif db_healthy:
+        health_status["status"] = "degraded"
+    else:
+        health_status["status"] = "unhealthy"
+
+    # Return 200 for healthy/degraded (API itself is functional),
+    # 503 only when truly unable to serve (database down).
+    # This prevents Traefik from dropping the container during startup
+    # races when downstream services aren't ready yet.
+    status_code = 200 if db_healthy else 503
 
     # Cache the result
     _api_health_cache = health_status

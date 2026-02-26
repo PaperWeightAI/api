@@ -41,7 +41,6 @@ def _setup_deps(transport, **overrides):
         "stock_service_url": "http://stock",
         "retail_service_url": "http://retail",
         "iot_service_url": "http://iot",
-        "internal_api_secret": "",
     }
     defaults.update(overrides)
     deps.auth_token = defaults["auth_token"]
@@ -49,7 +48,6 @@ def _setup_deps(transport, **overrides):
     deps.stock_service_url = defaults["stock_service_url"]
     deps.retail_service_url = defaults["retail_service_url"]
     deps.iot_service_url = defaults["iot_service_url"]
-    deps.internal_api_secret = defaults["internal_api_secret"]
     return httpx.AsyncClient(transport=transport)
 
 
@@ -523,16 +521,17 @@ class TestHeaders:
         assert captured_headers.get("authorization") == "Bearer my-jwt"
 
     @pytest.mark.asyncio
-    async def test_internal_secret_sent(self):
+    async def test_internal_secret_not_sent(self):
+        """X-Internal-Secret header should never be sent (removed)."""
         captured_headers = {}
         def handler(request: httpx.Request) -> httpx.Response:
             captured_headers.update(dict(request.headers))
             return httpx.Response(200, json=[])
         transport = httpx.MockTransport(handler)
-        async with _setup_deps(transport, internal_api_secret="secret123") as client:
+        async with _setup_deps(transport) as client:
             deps.http_client = client
             await tools.list_stores()
-        assert captured_headers.get("x-internal-secret") == "secret123"
+        assert "x-internal-secret" not in captured_headers
 
     @pytest.mark.asyncio
     async def test_ws_manager_token_preferred(self):

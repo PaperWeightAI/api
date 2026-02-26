@@ -7,7 +7,7 @@ Verifies:
 - Individual fetch methods (store, aisles, bays, shelves, products, devices, stats)
 - Parallel aggregation (aggregate_initial_data)
 - Error handling (timeouts, HTTP errors, malformed responses)
-- Header propagation (Authorization, X-Internal-Secret)
+- Header propagation (Authorization)
 - Inventory bulk fetch
 """
 

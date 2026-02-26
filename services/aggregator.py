@@ -19,7 +19,6 @@ logger = logging.getLogger("api.aggregator")
 STOCK_SERVICE_URL = os.getenv("STOCK_SERVICE_URL", "http://stock:8000")
 RETAIL_SERVICE_URL = os.getenv("RETAIL_SERVICE_URL", "http://retail:8000")
 IOT_SERVICE_URL = os.getenv("IOT_SERVICE_URL", "http://iot:8000")
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 
 
 class DataAggregator:
@@ -44,8 +43,6 @@ class DataAggregator:
         headers = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        if INTERNAL_API_SECRET:
-            headers["X-Internal-Secret"] = INTERNAL_API_SECRET
         return headers
 
     async def _fetch_json(

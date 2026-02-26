@@ -133,22 +133,26 @@ class TestInternalBroadcastEndpoint:
     @pytest.fixture
     def app_with_manager(self):
         """Create a minimal FastAPI app with WS manager."""
-        from fastapi import FastAPI, Request, HTTPException
-        import os
+        from fastapi import FastAPI, Request, HTTPException, Depends
+        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+        from typing import Optional
+
+        _security = HTTPBearer(auto_error=False)
+
+        async def _verify_token(
+            credentials: Optional[HTTPAuthorizationCredentials] = Depends(_security),
+        ) -> dict:
+            if not credentials or credentials.credentials != "test-token":
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            return {"sub": "test", "is_admin": True}
 
         app = FastAPI()
 
         ws_manager = WebSocketManager(stock_ws_url="ws://test")
         app.state.ws_manager = ws_manager
 
-        INTERNAL_API_SECRET = "test-secret"
-
         @app.post("/internal/broadcast")
-        async def internal_broadcast(request: Request):
-            header_secret = request.headers.get("X-Internal-Secret")
-            if header_secret != INTERNAL_API_SECRET:
-                raise HTTPException(status_code=403, detail="Unauthorized")
-
+        async def internal_broadcast(request: Request, _user: dict = Depends(_verify_token)):
             body = await request.json()
             events = body if isinstance(body, list) else [body]
             total_broadcast = 0
@@ -176,7 +180,7 @@ class TestInternalBroadcastEndpoint:
 
         return app, ws_manager
 
-    def test_unauthorized_without_secret(self, app_with_manager):
+    def test_unauthorized_without_token(self, app_with_manager):
         from fastapi.testclient import TestClient
         app, _ = app_with_manager
         client = TestClient(app)
@@ -185,9 +189,9 @@ class TestInternalBroadcastEndpoint:
             "/internal/broadcast",
             json={"storeId": 1, "eventType": "THEFT", "productId": 1},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_unauthorized_wrong_secret(self, app_with_manager):
+    def test_unauthorized_wrong_token(self, app_with_manager):
         from fastapi.testclient import TestClient
         app, _ = app_with_manager
         client = TestClient(app)
@@ -195,9 +199,9 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json={"storeId": 1, "eventType": "THEFT"},
-            headers={"X-Internal-Secret": "wrong"},
+            headers={"Authorization": "Bearer wrong-token"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     def test_single_event_broadcast(self, app_with_manager):
         from fastapi.testclient import TestClient
@@ -213,7 +217,7 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json={"storeId": 1, "eventType": "THEFT", "productId": 5},
-            headers={"X-Internal-Secret": "test-secret"},
+            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -238,7 +242,7 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json=events,
-            headers={"X-Internal-Secret": "test-secret"},
+            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -258,7 +262,7 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json={"storeId": 999, "eventType": "THEFT"},
-            headers={"X-Internal-Secret": "test-secret"},
+            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -272,7 +276,7 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json={"eventType": "THEFT"},
-            headers={"X-Internal-Secret": "test-secret"},
+            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -291,7 +295,7 @@ class TestInternalBroadcastEndpoint:
         resp = client.post(
             "/internal/broadcast",
             json={"storeId": 1, "eventType": "LEVEL_UPDATE", "productId": 10},
-            headers={"X-Internal-Secret": "test-secret"},
+            headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
 
@@ -327,7 +331,7 @@ class TestInternalBroadcastEndpoint:
             resp = client.post(
                 "/internal/broadcast",
                 json={"storeId": 1, "eventType": event_type, "productId": 1},
-                headers={"X-Internal-Secret": "test-secret"},
+                headers={"Authorization": "Bearer test-token"},
             )
             body = resp.json()
             assert body["events"] == (1 if should_count else 0), \
