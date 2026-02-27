@@ -157,7 +157,7 @@ class TestIndividualFetchers:
 
     @pytest.mark.asyncio
     async def test_fetch_restock_needs(self, restock_data):
-        transport = _transport({"/restock-needs": (200, restock_data)})
+        transport = _transport({"/stock": (200, restock_data)})
         async with httpx.AsyncClient(transport=transport) as client:
             agg = DataAggregator(client)
             result = await agg.fetch_restock_needs(1)
@@ -281,7 +281,7 @@ class TestAggregateInitialData:
             "/sensors/devices/counts": (200, devices_data),
             "/stats": (200, stats_data),
             "/retail/inventory/shelves/bulk": (200, []),
-            "/restock-needs": (200, restock_data),
+            "/stock": (200, restock_data),
         })
         async with httpx.AsyncClient(transport=transport) as client:
             agg = DataAggregator(client, token="tok")
@@ -346,7 +346,7 @@ class TestAggregateInitialData:
             "/sensors/devices/counts": (200, {"total": 0, "online": 0, "offline": 0}),
             "/stats": (200, {}),
             "/retail/inventory/shelves/bulk": (200, inventory),
-            "/restock-needs": (200, []),
+            "/stock": (200, []),
         })
         async with httpx.AsyncClient(transport=transport) as client:
             agg = DataAggregator(client)
@@ -366,7 +366,7 @@ class TestAggregateInitialData:
                 return httpx.Response(200, json={})
             if "/stats" in str(request.url):
                 return httpx.Response(200, json={})
-            if "/restock-needs" in str(request.url):
+            if "/stock" in str(request.url):
                 return httpx.Response(200, json=[])
             return httpx.Response(200, json=[])
 

@@ -61,7 +61,7 @@ async def get_store_info(store_id: int) -> dict:
 
 async def get_store_inventory(store_id: int, status_filter: Optional[str] = None) -> list[dict]:
     """Get inventory / restock needs for a store."""
-    url = f"{deps.stock_service_url}/restock-needs?storeId={store_id}"
+    url = f"{deps.stock_service_url}/stock?storeId={store_id}"
     if status_filter:
         url += f"&status={status_filter}"
     return await _get(url, default=[])

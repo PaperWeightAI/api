@@ -92,7 +92,7 @@ class TestStoreInventoryResource:
     @pytest.mark.asyncio
     async def test_returns_json_string(self):
         inventory = [{"productId": 1, "status": "LOW"}]
-        transport = _transport({"/restock-needs": (200, inventory)})
+        transport = _transport({"/stock": (200, inventory)})
         async with _setup(transport) as client:
             deps.http_client = client
             result = await resources.store_inventory_resource(1)

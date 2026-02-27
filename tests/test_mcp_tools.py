@@ -199,7 +199,7 @@ class TestGetStoreInfo:
 class TestGetStoreInventory:
     @pytest.mark.asyncio
     async def test_success(self, inventory_data):
-        transport = _transport({"/restock-needs": (200, inventory_data)})
+        transport = _transport({"/stock": (200, inventory_data)})
         async with _setup_deps(transport) as client:
             deps.http_client = client
             result = await tools.get_store_inventory(1)

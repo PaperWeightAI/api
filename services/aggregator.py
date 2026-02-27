@@ -155,7 +155,7 @@ class DataAggregator:
 
         Note: This is a REST fallback. Normally, inventory comes via WebSocket subscription.
         """
-        url = f"{STOCK_SERVICE_URL}/restock-needs?storeId={store_id}"
+        url = f"{STOCK_SERVICE_URL}/stock?storeId={store_id}"
         if status_filter:
             url += f"&status={status_filter}"
         return await self._fetch_json(url, "Stock/RestockNeeds", default=[])
