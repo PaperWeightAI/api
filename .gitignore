@@ -59,3 +59,7 @@ logs/
 # Keys
 *.pem
 !jwt_public_key.pem
+
+# Test artifacts
+.test_report.json
+coverage.json
