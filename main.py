@@ -68,14 +68,16 @@ _service_auth = ServiceAuthClient()
 
 
 async def _check_service_health(client: httpx.AsyncClient, service_url: str, service_name: str) -> bool:
-    """Check if a backend service is healthy."""
+    """Check if a backend service is healthy (best-effort at startup)."""
     try:
         response = await client.get(f"{service_url}/health", timeout=5.0)
         is_healthy = response.status_code == 200
         logger.info(f"{'✓' if is_healthy else '✗'} {service_name} health check: {response.status_code}")
         return is_healthy
     except Exception as e:
-        logger.error(f"✗ {service_name} health check failed: {e}")
+        # WARNING, not ERROR: during startup peer services may still be
+        # booting.  The health endpoint will succeed on subsequent checks.
+        logger.warning(f"✗ {service_name} health check failed: {e}")
         return False
 
 
