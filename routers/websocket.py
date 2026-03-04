@@ -331,7 +331,7 @@ async def internal_broadcast(request: Request, _user: dict = Depends(verify_toke
             continue
 
         event_type = event.get("eventType", "")
-        if event_type in ("THEFT", "RESTOCK"):
+        if event_type in ("THEFT", "RESTOCK", "RESTOCK_FULL", "RESTOCK_PARTIAL"):
             pool.receive_event(event)
             total_broadcast += 1
         elif event_type in (

@@ -290,11 +290,12 @@ class StoreConnectionPool:
     # --- Event routing ---
 
     def receive_event(self, event: dict) -> None:
-        """Immediately broadcast a THEFT/RESTOCK event to events_clients."""
-        if not self.events_clients:
-            return
+        """Immediately broadcast a THEFT/RESTOCK event to events and stock clients."""
         payload = json.dumps({"type": "event_pushed", "data": event})
-        self._create_tracked_task(self.broadcast_events(payload), "event_broadcast")
+        if self.events_clients:
+            self._create_tracked_task(self.broadcast_events(payload), "event_broadcast")
+        if self.stock_clients:
+            self._create_tracked_task(self.broadcast_stock(payload), "event_to_stock")
 
     def receive_stock_update(self, event: dict) -> None:
         """Accumulate a stock event into the snapshot buffer (flushed periodically)."""
