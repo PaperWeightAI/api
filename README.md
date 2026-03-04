@@ -277,7 +277,7 @@ services:
     build: ./api
     container_name: paperweight-api
     ports:
-      - "8007:8000"
+      - "9008:8000"
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/postgres
       - STOCK_SERVICE_URL=http://stock:8000
