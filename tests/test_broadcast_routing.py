@@ -56,7 +56,7 @@ class TestBroadcastLoopRouting:
         await asyncio.sleep(0.05)
 
         pool.ws_events.send_text.assert_called_once()
-        pool.ws_stock.send_text.assert_not_called()
+        pool.ws_stock.send_text.assert_called_once()
         pool.ws_store.send_text.assert_not_called()
 
     @pytest.mark.asyncio

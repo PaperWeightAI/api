@@ -128,8 +128,8 @@ class TestEventRouting:
         assert sent["data"]["productId"] == 5
 
     @pytest.mark.asyncio
-    async def test_receive_event_skips_when_no_events_clients(self):
-        """receive_event should not create a task when no events_clients."""
+    async def test_receive_event_still_sends_to_stock_when_no_events_clients(self):
+        """receive_event sends to stock_clients even when no events_clients."""
         ws_stock = _mock_ws("stock")
         self.pool.stock_clients.add(ws_stock)
 
@@ -137,11 +137,11 @@ class TestEventRouting:
         self.pool.receive_event(event)
         await asyncio.sleep(0.05)
 
-        # Stock client should NOT receive THEFT
-        ws_stock.send_text.assert_not_called()
+        # Stock client DOES receive THEFT (events are sent to both channels)
+        ws_stock.send_text.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_receive_event_does_not_go_to_stock_clients(self):
+    async def test_receive_event_goes_to_both_events_and_stock_clients(self):
         ws_stock = _mock_ws("stock")
         ws_events = _mock_ws("events")
         self.pool.stock_clients.add(ws_stock)
@@ -152,7 +152,7 @@ class TestEventRouting:
         await asyncio.sleep(0.05)
 
         ws_events.send_text.assert_called_once()
-        ws_stock.send_text.assert_not_called()
+        ws_stock.send_text.assert_called_once()
 
 
 class TestStockSnapshotAccumulator:
@@ -362,7 +362,7 @@ class TestInternalBroadcastRouting:
         await asyncio.sleep(0.05)
 
         ws_events.send_text.assert_called_once()
-        ws_stock.send_text.assert_not_called()
+        ws_stock.send_text.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_restock_routed_to_events(self):
